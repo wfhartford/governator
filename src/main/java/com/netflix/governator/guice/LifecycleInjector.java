@@ -20,12 +20,19 @@ import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Sets;
+import com.google.inject.AbstractModule;
 import com.google.inject.Guice;
 import com.google.inject.Inject;
 import com.google.inject.Injector;
+import com.google.inject.Key;
 import com.google.inject.Module;
+import com.google.inject.Provider;
 import com.google.inject.Stage;
 import com.netflix.governator.annotations.AutoBindSingleton;
+import com.netflix.governator.guice.lazy.FineGrainedLazySingleton;
+import com.netflix.governator.guice.lazy.FineGrainedLazySingletonScope;
+import com.netflix.governator.guice.lazy.LazySingleton;
+import com.netflix.governator.guice.lazy.LazySingletonScope;
 import com.netflix.governator.lifecycle.ClasspathScanner;
 import com.netflix.governator.lifecycle.LifecycleManager;
 import javax.annotation.Resource;
@@ -62,6 +69,10 @@ public class LifecycleInjector
     private final boolean ignoreAllClasses;
     private final LifecycleManager lifecycleManager;
     private final Injector injector;
+    private final BootstrapBinder bootstrapBinder;
+    private final Stage stage;
+    private final LifecycleInjectorMode mode;
+    private final List<Module> discoveredModules = Lists.newArrayList();
 
     /**
      * Create a new LifecycleInjector builder
@@ -137,7 +148,12 @@ public class LifecycleInjector
      */
     public Injector createChildInjector(Collection<Module> modules)
     {
-        return injector.createChildInjector(modules);
+        //noinspection deprecation
+        if ( mode == LifecycleInjectorMode.REAL_CHILD_INJECTORS )
+        {
+            return injector.createChildInjector(modules);
+        }
+        return createSimulatedChildInjector(modules);
     }
 
     /**
@@ -169,13 +185,25 @@ public class LifecycleInjector
      */
     public Injector createInjector(Collection<Module> additionalModules)
     {
-        if ( additionalModules == null )
+        // Add the discovered modules FIRST.  The discovered modules
+        // are added, and will subsequently be configured, in module dependency 
+        // order which will ensure that any singletons bound in these modules 
+        // will be created in the same order as the bind() calls are made.
+        // Note that the singleton ordering is only guaranteed for 
+        // singleton scope.
+        List<Module> localModules = Lists.newArrayList(discoveredModules);
+        
+        if ( additionalModules != null )
         {
-            additionalModules = Lists.newArrayList();
+            localModules.addAll(additionalModules);
         }
-        List<Module>            localModules = Lists.newArrayList(additionalModules);
+        
         localModules.addAll(modules);
 
+        // Finally, add the AutoBind module, which will use classpath scanning
+        // to creating singleton bindings.  These singletons will be instantiated
+        // in an indeterminate order but are guaranteed to occur AFTER singletons
+        // bound in any of the discovered modules.
         if ( !ignoreAllClasses )
         {
             Collection<Class<?>>    localIgnoreClasses = Sets.newHashSet(ignoreClasses);
@@ -185,23 +213,64 @@ public class LifecycleInjector
         return createChildInjector(localModules);
     }
 
-    LifecycleInjector(List<Module> modules, Collection<Class<?>> ignoreClasses, boolean ignoreAllClasses, BootstrapModule bootstrapModule, ClasspathScanner scanner, Collection<String> basePackages, Stage stage)
+    LifecycleInjector(List<Module> modules, Collection<Class<?>> ignoreClasses, boolean ignoreAllClasses, List<BootstrapModule> bootstrapModules, ClasspathScanner scanner, Collection<String> basePackages, Stage stage, LifecycleInjectorMode mode, Class<?> rootModule)
     {
-        stage = Preconditions.checkNotNull(stage, "stage cannot be null");
-
+        this.mode = Preconditions.checkNotNull(mode, "mode cannot be null");
+        this.stage = Preconditions.checkNotNull(stage, "stage cannot be null");
         this.ignoreAllClasses = ignoreAllClasses;
         this.ignoreClasses = ImmutableList.copyOf(ignoreClasses);
         this.modules = ImmutableList.copyOf(modules);
         this.scanner = (scanner != null) ? scanner : createStandardClasspathScanner(basePackages);
-
+        
+        InternalModuleDependencyModule moduleDepdencyModule = new InternalModuleDependencyModule();
         AtomicReference<LifecycleManager> lifecycleManagerRef = new AtomicReference<LifecycleManager>();
+        InternalBootstrapModule internalBootstrapModule = new InternalBootstrapModule(this.scanner, bootstrapModules);
         injector = Guice.createInjector
         (
             stage,
-            new InternalBootstrapModule(this.scanner, bootstrapModule),
-            new InternalLifecycleModule(lifecycleManagerRef)
+            internalBootstrapModule,
+            new InternalLifecycleModule(lifecycleManagerRef),
+            moduleDepdencyModule
         );
+        if (rootModule != null)
+            injector.getInstance(rootModule);
+        this.discoveredModules.addAll(moduleDepdencyModule.getModules());
         lifecycleManager = injector.getInstance(LifecycleManager.class);
         lifecycleManagerRef.set(lifecycleManager);
+        bootstrapBinder = internalBootstrapModule.getBootstrapBinder();
+    }
+
+    private Injector createSimulatedChildInjector(Collection<Module> modules)
+    {
+        AbstractModule parentObjects = new AbstractModule()
+        {
+            @Override
+            protected void configure()
+            {
+                for ( Key key : bootstrapBinder.getBoundKeys() )
+                {
+                    Provider instance = injector.getProvider(key);
+                    //noinspection unchecked
+                    bind(key).toProvider(instance);
+                }
+                for ( Class clazz : bootstrapBinder.getBoundClasses() )
+                {
+                    Provider instance = injector.getProvider(clazz);
+                    //noinspection unchecked
+                    bind(clazz).toProvider(instance);
+                }
+                bindScope(LazySingleton.class, LazySingletonScope.get());
+                bindScope(FineGrainedLazySingleton.class, FineGrainedLazySingletonScope.get());
+                bind(LifecycleManager.class).toInstance(lifecycleManager);
+            }
+        };
+
+        AtomicReference<LifecycleManager> lifecycleManagerAtomicReference = new AtomicReference<LifecycleManager>(lifecycleManager);
+        InternalLifecycleModule internalLifecycleModule = new InternalLifecycleModule(lifecycleManagerAtomicReference);
+
+        List<Module> localModules = Lists.newArrayList(modules);
+        localModules.add(parentObjects);
+        localModules.add(internalLifecycleModule);
+        return Guice.createInjector(stage, localModules);
     }
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright 2013 Netflix, Inc.
+ * Copyright 2014 Netflix, Inc.
  *
  *    Licensed under the Apache License, Version 2.0 (the "License");
  *    you may not use this file except in compliance with the License.
@@ -14,27 +14,17 @@
  *    limitations under the License.
  */
 
-package com.netflix.governator.guice.lazy;
+package com.netflix.governator.guice;
 
-import com.google.inject.Scope;
-
-/**
- * A singleton factory that returns a Guice {@link Scope} that enables lazy singletons
- */
-public class LazySingletonScope
+public enum LifecycleInjectorMode
 {
     /**
-     * Returns the scope
-     * @return scope
+     * @deprecated using Guice child injectors has unwanted side effects. It also makes some patterns (e.g. injecting the Injector) difficult
      */
-    public static Scope get()
-    {
-        return instance;
-    }
+    REAL_CHILD_INJECTORS,
 
-    private static final Scope instance = new LazySingletonScopeImpl();
-
-    private LazySingletonScope()
-    {
-    }
+    /**
+     * In this mode {@link LifecycleInjector} no longer uses Guice child injectors. Instead, bootstrap objects are copied into a new injector
+     */
+    SIMULATED_CHILD_INJECTORS
 }

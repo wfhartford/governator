@@ -1,5 +1,5 @@
 /*
- * Copyright 2013 Netflix, Inc.
+ * Copyright 2014 Netflix, Inc.
  *
  *    Licensed under the Apache License, Version 2.0 (the "License");
  *    you may not use this file except in compliance with the License.
@@ -14,27 +14,21 @@
  *    limitations under the License.
  */
 
-package com.netflix.governator.guice.lazy;
+package com.netflix.governator;
 
-import com.google.inject.Scope;
+import com.netflix.governator.guice.LifecycleInjector;
+import com.netflix.governator.guice.LifecycleInjectorMode;
+import org.testng.annotations.DataProvider;
 
-/**
- * A singleton factory that returns a Guice {@link Scope} that enables lazy singletons
- */
-public class LazySingletonScope
+public class LifecycleInjectorBuilderProvider
 {
-    /**
-     * Returns the scope
-     * @return scope
-     */
-    public static Scope get()
+    @DataProvider(name = "builders")
+    public static Object[][] getBuilders()
     {
-        return instance;
-    }
-
-    private static final Scope instance = new LazySingletonScopeImpl();
-
-    private LazySingletonScope()
-    {
+        return new Object[][]
+        {
+            new Object[] { LifecycleInjector.builder() },
+            new Object[] { LifecycleInjector.builder().withMode(LifecycleInjectorMode.SIMULATED_CHILD_INJECTORS) }
+        };
     }
 }
